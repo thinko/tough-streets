@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,14 +10,21 @@ import (
 
 	"tough-streets/internal/config"
 	"tough-streets/internal/lifecycle"
+	"tough-streets/internal/logger"
+	"tough-streets/internal/metrics"
 	"tough-streets/internal/processor"
+	"tough-streets/internal/server/services/dns"
+	"tough-streets/internal/server/storage"
 	"tough-streets/internal/transport"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"net/http"
 )
 
 func main() {
-	log.Println("Tough-Streets server starting...")
+	log := logger.GetLogger()
+	log.Info("Tough-Streets server starting...")
 
 	// Create a cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -27,15 +33,26 @@ func main() {
 	// Load configuration
 	cfg := loadConfig()
 
+	// Initialize metrics HTTP server
+	go func() {
+		metricsServer := &http.Server{
+			Addr:    ":9090",
+			Handler: promhttp.Handler(),
+		}
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.WithError(err).Error("Metrics server failed")
+		}
+	}()
+
 	// Initialize transport layer
 	trans, err := initializeTransport(cfg.Transport)
 	if err != nil {
-		log.Fatalf("Failed to initialize transport: %v", err)
+		log.WithError(err).Fatal("Failed to initialize transport")
 	}
 	defer trans.Close()
 
 	// Initialize processor and worker pool
-	proc := &processor.BaseProcessor{}
+	proc := processor.NewBaseProcessor()
 	pool := processor.NewWorkerPool(proc, trans, cfg.Processor.WorkerCount)
 
 	// Initialize Elasticsearch client
@@ -45,20 +62,31 @@ func main() {
 		Password:  cfg.Storage.Primary.Password,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create Elasticsearch client: %v", err)
+		log.WithError(err).Fatal("Failed to create Elasticsearch client")
+	}
+
+	// Initialize storage layer
+	db := storage.NewElasticsearchStorage(esClient)
+
+	// Initialize DNS server if enabled
+	if cfg.Server.DNS.Enabled {
+		dnsServer := dns.NewServer(cfg.Server.DNS, db)
+		if err := dnsServer.Start(); err != nil {
+			log.WithError(err).Error("Failed to start DNS server")
+		}
 	}
 
 	// Initialize lifecycle manager
-	storage := lifecycle.NewESStorage(esClient)
-	lifecycleManager := lifecycle.NewESLifecycleManager(cfg.Storage.Lifecycle, storage)
+	lmStorage := lifecycle.NewESStorage(esClient)
+	lifecycleManager := lifecycle.NewESLifecycleManager(cfg.Storage.Lifecycle, lmStorage)
 	if err := lifecycleManager.Initialize(ctx); err != nil {
-		log.Fatalf("Failed to initialize lifecycle manager: %v", err)
+		log.WithError(err).Fatal("Failed to initialize lifecycle manager")
 	}
 	defer lifecycleManager.Close()
 
 	// Start worker pool
 	if err := pool.Start(ctx); err != nil {
-		log.Fatalf("Failed to start worker pool: %v", err)
+		log.WithError(err).Fatal("Failed to start worker pool")
 	}
 
 	// Start periodic cleanup
@@ -77,9 +105,18 @@ func main() {
 func loadConfig() *config.Config {
 	// TODO: Load configuration from file or environment
 	return &config.Config{
-		Transport: config.TransportConfig{
+		Server: config.ServerConfig{
+			DNS: config.DNSConfig{
+				Enabled:     true,
+				ListenAddr:  "0.0.0.0:53",
+				Forwarders:  []string{"8.8.8.8", "8.8.4.4"},
+				CacheTTLSec: 300,
+				LocalDomain: "tough.lan",
+			},
+		},
+		Transport: transport.Config{
 			Type: "in_memory",
-			InMemory: config.InMemoryTransportConfig{
+			InMemory: transport.InMemoryConfig{
 				ChannelBufferSize: 1000,
 				MaxQueueSize:     10000,
 			},

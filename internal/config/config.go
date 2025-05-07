@@ -1,6 +1,25 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"tough-streets/internal/server/config/server"
+	"tough-streets/internal/transport"
+)
+
+// Config represents the main application configuration
+type Config struct {
+	Server    ServerConfig      `yaml:"server"`
+	Transport transport.Config  `yaml:"transport"`
+	Processor ProcessorConfig  `yaml:"processor"`
+	Storage   StorageConfig    `yaml:"storage"`
+}
+
+// ServerConfig holds configuration for all server components
+type ServerConfig struct {
+	DNS  DNSConfig  `yaml:"dns"`
+	DHCP DHCPConfig `yaml:"dhcp"`
+}
 
 // TransportConfig defines how packets are moved between components
 type TransportConfig struct {
