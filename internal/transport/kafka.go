@@ -6,21 +6,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 )
 
 // KafkaTransportConfig holds configuration for the Kafka transport
 type KafkaTransportConfig struct {
-	Brokers           []string      // List of Kafka brokers
-	Topic             string        // Kafka topic for packet data
-	ConsumerGroup     string        // Consumer group ID
-	ProducerRetries   int          // Number of times to retry failed publishes
-	BatchSize         int          // Number of messages to batch before sending
-	BatchTimeout      time.Duration // Maximum time to wait before sending a batch
-	EnableTLS         bool         // Enable TLS for Kafka connections
-	EnableSASL        bool         // Enable SASL authentication
-	SASLUser         string        // SASL username
-	SASLPassword     string        // SASL password
+	Brokers         []string      // List of Kafka brokers
+	Topic           string        // Kafka topic for packet data
+	ConsumerGroup   string        // Consumer group ID
+	ProducerRetries int           // Number of times to retry failed publishes
+	BatchSize       int           // Number of messages to batch before sending
+	BatchTimeout    time.Duration // Maximum time to wait before sending a batch
+	EnableTLS       bool          // Enable TLS for Kafka connections
+	EnableSASL      bool          // Enable SASL authentication
+	SASLUser        string        // SASL username
+	SASLPassword    string        // SASL password
 }
 
 // KafkaTransport implements PacketTransport using Apache Kafka

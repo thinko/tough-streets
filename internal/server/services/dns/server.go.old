@@ -3,87 +3,24 @@ package dns
 import (
 	"net"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/miekg/dns"
+	"github.com/cenkalti/backoff/v4"
 
-	"tough-streets/internal/config"
+	"tough-streets/internal/server/config"
+	"tough-streets/internal/server/models"
+	"tough-streets/internal/server/storage"
 	"tough-streets/internal/logger"
 	"tough-streets/internal/metrics"
-	"tough-streets/internal/server/storage"
 )
-
-// dnsCache implements a simple cache for DNS responses
-type dnsCache struct {
-	sync.RWMutex
-	items    map[string]*dnsCacheItem
-	maxItems int
-}
-
-type dnsCacheItem struct {
-	msg     *dns.Msg
-	expires time.Time
-}
-
-func newDNSCache(maxItems int) *dnsCache {
-	return &dnsCache{
-		items:    make(map[string]*dnsCacheItem),
-		maxItems: maxItems,
-	}
-}
-
-func (c *dnsCache) Get(key string) (*dns.Msg, bool) {
-	c.RLock()
-	defer c.RUnlock()
-
-	if item, exists := c.items[key]; exists {
-		if time.Now().Before(item.expires) {
-			return item.msg, true
-		}
-		// Item expired, remove it
-		delete(c.items, key)
-	}
-	return nil, false
-}
-
-func (c *dnsCache) Set(key string, msg *dns.Msg, ttl time.Duration) {
-	c.Lock()
-	defer c.Unlock()
-
-	// Remove old items if we're at capacity
-	if len(c.items) >= c.maxItems {
-		// Remove expired items first
-		now := time.Now()
-		for k, v := range c.items {
-			if now.After(v.expires) {
-				delete(c.items, k)
-			}
-		}
-		// If still at capacity, remove random items
-		for k := range c.items {
-			if len(c.items) < c.maxItems {
-				break
-			}
-			delete(c.items, k)
-		}
-	}
-
-	c.items[key] = &dnsCacheItem{
-		msg:     msg,
-		expires: time.Now().Add(ttl),
-	}
-}
 
 // Server represents the DNS service
 type Server struct {
-	config    config.DNSConfig
-	db        storage.DataAccessLayer
-	cache     *dnsCache
-	log       *logger.Logger
-	udpServer *dns.Server
-	tcpServer *dns.Server
+	config config.DNSConfig
+	db     storage.DataAccessLayer
+	cache  *cache.Cache
+	log    *logger.Logger
 }
 
 // NewServer creates a new DNS server instance
@@ -91,7 +28,7 @@ func NewServer(cfg config.DNSConfig, db storage.DataAccessLayer) *Server {
 	return &Server{
 		config: cfg,
 		db:     db,
-		cache:  newDNSCache(10000), // Cache up to 10k items
+		cache:  cache.New(time.Duration(cfg.CacheTTLSec)*time.Second, time.Duration(cfg.CacheTTLSec)*time.Second*2),
 		log:    logger.GetLogger().WithField("component", "dns_server"),
 	}
 }
@@ -100,21 +37,21 @@ func NewServer(cfg config.DNSConfig, db storage.DataAccessLayer) *Server {
 func (s *Server) Start() error {
 	dns.HandleFunc(".", s.handleRequest)
 
-	s.udpServer = &dns.Server{Addr: s.config.ListenAddr, Net: "udp"}
-	s.tcpServer = &dns.Server{Addr: s.config.ListenAddr, Net: "tcp"}
+	udpServer := &dns.Server{Addr: s.config.ListenAddr, Net: "udp"}
+	tcpServer := &dns.Server{Addr: s.config.ListenAddr, Net: "tcp"}
 
 	s.log.WithFields(logger.Fields{
-		"listen_addr":  s.config.ListenAddr,
-		"local_domain": s.config.LocalDomain,
-		"cache_ttl":    s.config.CacheTTLSec,
-		"forwarders":   s.config.Forwarders,
+		"listen_addr":    s.config.ListenAddr,
+		"local_domain":   s.config.LocalDomain,
+		"cache_ttl_sec":  s.config.CacheTTLSec,
+		"forwarders":     s.config.Forwarders,
 	}).Info("Starting DNS server")
 
 	metrics.DNSQueries.WithLabelValues("server", "start").Inc()
 
 	// Start UDP server
 	go func() {
-		if err := s.udpServer.ListenAndServe(); err != nil {
+		if err := udpServer.ListenAndServe(); err != nil {
 			s.log.WithError(err).Error("UDP server failure")
 			metrics.DNSQueries.WithLabelValues("udp", "error").Inc()
 		}
@@ -122,7 +59,7 @@ func (s *Server) Start() error {
 
 	// Start TCP server
 	go func() {
-		if err := s.tcpServer.ListenAndServe(); err != nil {
+		if err := tcpServer.ListenAndServe(); err != nil {
 			s.log.WithError(err).Error("TCP server failure")
 			metrics.DNSQueries.WithLabelValues("tcp", "error").Inc()
 		}
@@ -131,30 +68,14 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down the DNS server
-func (s *Server) Stop() error {
-	if s.udpServer != nil {
-		if err := s.udpServer.Shutdown(); err != nil {
-			s.log.WithError(err).Error("UDP server shutdown failed")
-		}
-	}
-	if s.tcpServer != nil {
-		if err := s.tcpServer.Shutdown(); err != nil {
-			s.log.WithError(err).Error("TCP server shutdown failed")
-		}
-	}
-	return nil
-}
-
 func (s *Server) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	startTime := time.Now()
 	defer func() {
-		if len(r.Question) > 0 {
-			metrics.DNSLatency.WithLabelValues(
-				dns.TypeToString[r.Question[0].Qtype],
-				w.RemoteAddr().Network(),
-			).Observe(time.Since(startTime).Seconds())
-		}
+		duration := time.Since(startTime).Seconds()
+		metrics.DNSLatency.WithLabelValues(
+			dns.TypeToString[r.Question[0].Qtype],  // query_type
+			w.RemoteAddr().Network(),               // resolver
+		).Observe(duration)
 	}()
 
 	m := new(dns.Msg)
@@ -162,9 +83,9 @@ func (s *Server) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	m.Authoritative = false
 
 	log := s.log.WithFields(logger.Fields{
-		"operation":   "dns_query",
-		"client_addr": w.RemoteAddr().String(),
-		"protocol":    w.RemoteAddr().Network(),
+		"operation":     "dns_query",
+		"client_addr":   w.RemoteAddr().String(),
+		"protocol":      w.RemoteAddr().Network(),
 	})
 
 	if len(r.Question) == 0 {
@@ -185,14 +106,16 @@ func (s *Server) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 	// Try handling the request with exponential backoff
 	operation := func() error {
 		// 1. Check local cache
-		if cachedMsg, found := s.cache.Get(cacheKey); found {
-			metrics.DNSCacheHits.Inc()
-			metrics.DNSQueries.WithLabelValues("query", "cache_hit").Inc()
-			log.Debug("Cache hit")
-			m.Answer = cachedMsg.Answer
-			m.Ns = cachedMsg.Ns
-			m.Extra = cachedMsg.Extra
-			return w.WriteMsg(m)
+		if cachedItem, found := s.cache.Get(cacheKey); found {
+				metrics.DNSCacheHits.Inc()
+				metrics.DNSQueries.WithLabelValues("query", "cache_hit").Inc()
+				log.Debug("Cache hit")
+				if cachedMsg, ok := cachedItem.(*dns.Msg); ok {
+					m.Answer = cachedMsg.Answer
+					m.Ns = cachedMsg.Ns
+					m.Extra = cachedMsg.Extra
+					return w.WriteMsg(m)
+				}
 		}
 		metrics.DNSCacheMisses.Inc()
 
@@ -228,7 +151,7 @@ func (s *Server) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 				m.Authoritative = true
 				metrics.DNSQueries.WithLabelValues("local", "success").Inc()
 				log.WithField("answers", len(m.Answer)).Info("Local resolution successful")
-				s.cache.Set(cacheKey, m, time.Duration(s.config.CacheTTLSec)*time.Second)
+				s.cache.Set(cacheKey, m, cache.DefaultExpiration)
 				return w.WriteMsg(m)
 			}
 		}
@@ -245,7 +168,7 @@ func (s *Server) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 						"forwarder": forwarder,
 						"rtt_ms":    rtt.Milliseconds(),
 					}).Debug("Forward successful")
-					s.cache.Set(cacheKey, resp, time.Duration(s.config.CacheTTLSec)*time.Second)
+					s.cache.Set(cacheKey, resp, cache.DefaultExpiration)
 					return w.WriteMsg(resp)
 				}
 				log.WithError(err).WithField("forwarder", forwarder).Warn("Forward failed")

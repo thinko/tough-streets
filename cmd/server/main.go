@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,15 +12,16 @@ import (
 	"tough-streets/internal/config"
 	"tough-streets/internal/lifecycle"
 	"tough-streets/internal/logger"
-	"tough-streets/internal/metrics"
 	"tough-streets/internal/processor"
+	"tough-streets/internal/server/services/dhcp"
 	"tough-streets/internal/server/services/dns"
 	"tough-streets/internal/server/storage"
 	"tough-streets/internal/transport"
 
+	"net/http"
+
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"net/http"
 )
 
 func main() {
@@ -76,6 +78,18 @@ func main() {
 		}
 	}
 
+	// Initialize DHCP server if enabled
+	if cfg.Server.DHCP.Enabled {
+		dhcpServer, err := dhcp.NewServer(cfg.Server.DHCP, db)
+		if err != nil {
+			log.WithError(err).Error("Failed to create DHCP server")
+		} else {
+			if err := dhcpServer.Start(); err != nil {
+				log.WithError(err).Error("Failed to start DHCP server")
+			}
+		}
+	}
+
 	// Initialize lifecycle manager
 	lmStorage := lifecycle.NewESStorage(esClient)
 	lifecycleManager := lifecycle.NewESLifecycleManager(cfg.Storage.Lifecycle, lmStorage)
@@ -97,7 +111,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigChan
-	log.Println("Received shutdown signal, stopping gracefully...")
+	log.Info("Received shutdown signal, stopping gracefully...")
 	cancel()
 	pool.Stop()
 }
@@ -118,11 +132,11 @@ func loadConfig() *config.Config {
 			Type: "in_memory",
 			InMemory: transport.InMemoryConfig{
 				ChannelBufferSize: 1000,
-				MaxQueueSize:     10000,
+				MaxQueueSize:      10000,
 			},
 		},
 		Processor: config.ProcessorConfig{
-			WorkerCount:   4,
+			WorkerCount:  4,
 			SamplingRate: 0,
 		},
 		Storage: config.StorageConfig{
@@ -132,23 +146,35 @@ func loadConfig() *config.Config {
 				Password: "changeme",
 			},
 			Lifecycle: config.LifecycleConfig{
-				PacketRetention:    24 * time.Hour,
-				FlowRetention:      7 * 24 * time.Hour,
-				MetricsRetention:   30 * 24 * time.Hour,
-				TopologyRetention:  90 * 24 * time.Hour,
-				EnableArchival:     true,
-				ArchivalTarget:     "backup_repository",
+				PacketRetention:   24 * time.Hour,
+				FlowRetention:     7 * 24 * time.Hour,
+				MetricsRetention:  30 * 24 * time.Hour,
+				TopologyRetention: 90 * 24 * time.Hour,
+				EnableArchival:    true,
+				ArchivalTarget:    "backup_repository",
 			},
 		},
 	}
 }
 
-func initializeTransport(cfg config.TransportConfig) (transport.PacketTransport, error) {
+func initializeTransport(cfg transport.Config) (transport.PacketTransport, error) {
 	switch cfg.Type {
 	case "in_memory":
-		return transport.NewInMemoryTransport(cfg.InMemory), nil
+		return transport.NewInMemoryTransport(transport.InMemoryTransportConfig{
+			ChannelBufferSize: cfg.InMemory.ChannelBufferSize,
+			MaxQueueSize:      cfg.InMemory.MaxQueueSize,
+		}), nil
 	case "kafka":
-		return transport.NewKafkaTransport(cfg.Kafka)
+		return transport.NewKafkaTransport(transport.KafkaTransportConfig{
+			Brokers:         cfg.Kafka.Brokers,
+			Topic:           cfg.Kafka.Topic,
+			ConsumerGroup:   cfg.Kafka.ConsumerGroup,
+			ProducerRetries: 3,
+			BatchSize:       1000,
+			BatchTimeout:    time.Second * 5,
+			EnableTLS:       cfg.Kafka.ReplicationFactor > 1,
+			EnableSASL:      false,
+		})
 	default:
 		return nil, fmt.Errorf("unsupported transport type: %s", cfg.Type)
 	}

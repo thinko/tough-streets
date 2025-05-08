@@ -1,0 +1,304 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tough-streets
+  annotations:
+    description: "Tough Streets - Network discovery and DHCP/DNS service"
+    tags: "networking,dhcp,dns"
+    iconClass: "icon-shadowman"
+    openshift.io/display-name: "Tough Streets Network Service"
+    openshift.io/documentation-url: "https://github.com/your-org/tough-streets"
+    openshift.io/support-url: "https://github.com/your-org/tough-streets/issues"
+    openshift.io/provider-display-name: "Your Organization"
+objects:
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: tough-streets
+    labels:
+      app: tough-streets
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: tough-streets
+    template:
+      metadata:
+        labels:
+          app: tough-streets
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "9090"
+      spec:
+        containers:
+        - name: tough-streets
+          image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - NET_ADMIN
+              - NET_RAW
+              - NET_BIND_SERVICE
+            runAsNonRoot: true
+          ports:
+          - containerPort: 9090
+            name: metrics
+          - containerPort: 53
+            name: dns-tcp
+            protocol: TCP
+          - containerPort: 53
+            name: dns-udp
+            protocol: UDP
+          env:
+          - name: ES_HOSTS
+            value: ${ELASTICSEARCH_HOST}
+          - name: ES_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: ${ELASTICSEARCH_SECRET}
+                key: username
+          - name: ES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: ${ELASTICSEARCH_SECRET}
+                key: password
+          - name: INTERFACE
+            value: ${NETWORK_INTERFACE}
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+          - name: config-volume
+            mountPath: /app/config
+        volumes:
+        - name: config-volume
+          configMap:
+            name: tough-streets-config
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: tough-streets
+    labels:
+      app: tough-streets
+  spec:
+    ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+    - name: dns-tcp
+      port: 53
+      targetPort: 53
+      protocol: TCP
+    - name: dns-udp
+      port: 53
+      targetPort: 53
+      protocol: UDP
+    selector:
+      app: tough-streets
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: tough-streets-config
+  data:
+    production.yaml: |
+      server:
+        dns:
+          enabled: true
+          listen_addr: "0.0.0.0:53"
+          forwarders:
+            - "${DNS_FORWARDER_1}"
+            - "${DNS_FORWARDER_2}"
+          cache_ttl_sec: 300
+          local_domain: "${LOCAL_DOMAIN}"
+        dhcp:
+          enabled: true
+          interface: "${NETWORK_INTERFACE}"
+          lease_time_sec: ${DHCP_LEASE_TIME}
+          ip_range_start: "${DHCP_RANGE_START}"
+          ip_range_end: "${DHCP_RANGE_END}"
+          router_ip: "${ROUTER_IP}"
+          dns_servers:
+            - "${DNS_SERVER}"
+          domain_name: "${LOCAL_DOMAIN}"
+      
+      transport:
+        type: "${TRANSPORT_TYPE}"
+        in_memory:
+          channel_buffer_size: 1000
+          max_queue_size: 10000
+        kafka:
+          brokers:
+            - "${KAFKA_BROKER}"
+          topic: "network-packets"
+          consumer_group: "tough-streets"
+          producer_retries: 3
+          batch_size: 1000
+          batch_timeout: "5s"
+          enable_tls: ${KAFKA_TLS}
+          enable_sasl: ${KAFKA_SASL}
+          sasl_user: "${KAFKA_USER}"
+          sasl_password: "${KAFKA_PASSWORD}"
+      
+      processor:
+        worker_count: ${WORKER_COUNT}
+        sampling_rate: 0
+      
+      storage:
+        primary:
+          nodes:
+            - "${ELASTICSEARCH_HOST}"
+          index_prefix: "tough-streets"
+          username: "${ES_USERNAME}"
+          password: "${ES_PASSWORD}"
+          enable_tls: ${ES_TLS}
+          shards: ${ES_SHARDS}
+          replicas: ${ES_REPLICAS}
+        lifecycle:
+          packet_retention: "${PACKET_RETENTION}"
+          flow_retention: "${FLOW_RETENTION}"
+          metrics_retention: "${METRICS_RETENTION}"
+          topology_retention: "${TOPOLOGY_RETENTION}"
+          enable_archival: ${ENABLE_ARCHIVAL}
+          archival_target: "${ARCHIVAL_TARGET}"
+parameters:
+- name: IMAGE_REPOSITORY
+  description: "The container image repository for tough-streets"
+  required: true
+  value: "quay.io/your-org/tough-streets"
+- name: IMAGE_TAG
+  description: "The container image tag to deploy"
+  required: true
+  value: "latest"
+- name: ELASTICSEARCH_HOST
+  description: "Elasticsearch host address (including protocol and port)"
+  required: true
+  value: "http://elasticsearch:9200"
+- name: ELASTICSEARCH_SECRET
+  description: "Name of the secret containing Elasticsearch credentials"
+  required: true
+  value: "elasticsearch-creds"
+- name: NETWORK_INTERFACE
+  description: "Network interface to use for DHCP"
+  required: true
+  value: "eth0"
+- name: DNS_FORWARDER_1
+  description: "Primary DNS forwarder"
+  required: true
+  value: "8.8.8.8"
+- name: DNS_FORWARDER_2
+  description: "Secondary DNS forwarder"
+  required: true
+  value: "8.8.4.4"
+- name: LOCAL_DOMAIN
+  description: "Local domain for DNS resolution"
+  required: true
+  value: "tough.lan"
+- name: DHCP_LEASE_TIME
+  description: "DHCP lease time in seconds"
+  required: true
+  value: "3600"
+- name: DHCP_RANGE_START
+  description: "Start of DHCP IP range"
+  required: true
+  value: "192.168.1.100"
+- name: DHCP_RANGE_END
+  description: "End of DHCP IP range"
+  required: true
+  value: "192.168.1.200"
+- name: ROUTER_IP
+  description: "Default gateway IP"
+  required: true
+  value: "192.168.1.1"
+- name: DNS_SERVER
+  description: "DNS server to offer via DHCP"
+  required: true
+  value: "192.168.1.1"
+- name: TRANSPORT_TYPE
+  description: "Transport type (in_memory or kafka)"
+  required: true
+  value: "in_memory"
+- name: KAFKA_BROKER
+  description: "Kafka broker address"
+  required: false
+  value: "kafka:9092"
+- name: KAFKA_TLS
+  description: "Enable TLS for Kafka"
+  required: false
+  value: "false"
+- name: KAFKA_SASL
+  description: "Enable SASL for Kafka"
+  required: false
+  value: "false"
+- name: KAFKA_USER
+  description: "Kafka SASL username"
+  required: false
+  value: ""
+- name: KAFKA_PASSWORD
+  description: "Kafka SASL password"
+  required: false
+  value: ""
+- name: WORKER_COUNT
+  description: "Number of worker threads"
+  required: true
+  value: "4"
+- name: ES_USERNAME
+  description: "Elasticsearch username"
+  required: false
+  value: "elastic"
+- name: ES_PASSWORD
+  description: "Elasticsearch password"
+  required: false
+  value: "changeme"
+- name: ES_TLS
+  description: "Enable TLS for Elasticsearch"
+  required: false
+  value: "false"
+- name: ES_SHARDS
+  description: "Number of shards for Elasticsearch indices"
+  required: false
+  value: "3"
+- name: ES_REPLICAS
+  description: "Number of replicas for Elasticsearch indices"
+  required: false
+  value: "1"
+- name: PACKET_RETENTION
+  description: "Packet data retention period"
+  required: false
+  value: "24h"
+- name: FLOW_RETENTION
+  description: "Flow data retention period"
+  required: false
+  value: "168h"
+- name: METRICS_RETENTION
+  description: "Metrics data retention period"
+  required: false
+  value: "720h"
+- name: TOPOLOGY_RETENTION
+  description: "Topology data retention period"
+  required: false
+  value: "2160h"
+- name: ENABLE_ARCHIVAL
+  description: "Enable data archival"
+  required: false
+  value: "true"
+- name: ARCHIVAL_TARGET
+  description: "Target for archived data"
+  required: false
+  value: "backup_repository"

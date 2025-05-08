@@ -57,4 +57,53 @@ var (
 		Help:    "Time spent on storage operations",
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // From 1ms to ~500ms
 	}, []string{"operation"})
+
+	// DNS server metrics
+	DNSQueries = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "tough_streets_dns_queries_total",
+		Help: "The total number of DNS queries",
+	}, []string{"type", "status"})
+
+	DNSCacheHits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tough_streets_dns_cache_hits_total",
+		Help: "The total number of DNS cache hits",
+	})
+
+	DNSCacheMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tough_streets_dns_cache_misses_total",
+		Help: "The total number of DNS cache misses",
+	})
+
+	DNSLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tough_streets_dns_query_duration_seconds",
+		Help:    "Time spent processing DNS queries",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // From 1ms to ~500ms
+	}, []string{"query_type", "resolver"})
+
+	// DHCP server metrics
+	DHCPOperations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "tough_streets_dhcp_operations_total",
+		Help: "The total number of DHCP operations",
+	}, []string{"operation", "status"})
+
+	ActiveLeases = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tough_streets_dhcp_active_leases",
+		Help: "Number of currently active DHCP leases",
+	})
+
+	DHCPPoolUtilization = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "tough_streets_dhcp_pool_utilization_percent",
+		Help: "DHCP address pool utilization percentage",
+	}, []string{"pool"})
+
+	LeasedAddresses = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "tough_streets_dhcp_leased_addresses",
+		Help: "Number of addresses currently leased per pool",
+	}, []string{"pool"})
+
+	DHCPLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tough_streets_dhcp_operation_duration_seconds",
+		Help:    "Time spent processing DHCP operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // From 1ms to ~500ms
+	}, []string{"operation"})
 )

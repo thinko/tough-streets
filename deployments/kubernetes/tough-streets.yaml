@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tough-streets
+  labels:
+    app: tough-streets
+spec:
+  replicas: 1  # Only one instance should run
+  selector:
+    matchLabels:
+      app: tough-streets
+  template:
+    metadata:
+      labels:
+        app: tough-streets
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+      - name: tough-streets
+        image: ${CONTAINER_REGISTRY}/tough-streets:latest
+        imagePullPolicy: Always
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+            - NET_BIND_SERVICE
+          runAsNonRoot: true
+        ports:
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
+        - containerPort: 53
+          name: dns-udp
+          protocol: UDP
+        env:
+        - name: ES_HOSTS
+          value: ${ELASTICSEARCH_HOST}
+        - name: ES_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-creds
+              key: username
+        - name: ES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-creds
+              key: password
+        - name: INTERFACE
+          value: "eth0"
+        resources:
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: tough-streets-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tough-streets
+  labels:
+    app: tough-streets
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  - name: dns-tcp
+    port: 53
+    targetPort: 53
+    protocol: TCP
+  - name: dns-udp
+    port: 53
+    targetPort: 53
+    protocol: UDP
+  selector:
+    app: tough-streets
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tough-streets-config
+data:
+  production.yaml: |
+    server:
+      dns:
+        enabled: true
+        listen_addr: "0.0.0.0:53"
+        forwarders:
+          - "8.8.8.8"
+          - "8.8.4.4"
+        cache_ttl_sec: 300
+        local_domain: "tough.lan"
+      dhcp:
+        enabled: true
+        interface: ${INTERFACE}
+        lease_time_sec: 3600
+        ip_range_start: "192.168.1.100"
+        ip_range_end: "192.168.1.200"
+        router_ip: "192.168.1.1"
+        dns_servers:
+          - "192.168.1.1"
+        domain_name: "tough.lan"
+    
+    transport:
+      type: "in_memory"
+      in_memory:
+        channel_buffer_size: 1000
+        max_queue_size: 10000
+      kafka:
+        brokers:
+          - "${KAFKA_BROKER}"
+        topic: "network-packets"
+        consumer_group: "tough-streets"
+        producer_retries: 3
+        batch_size: 1000
+        batch_timeout: "5s"
+        enable_tls: true
+        enable_sasl: true
+        sasl_user: "${KAFKA_USER}"
+        sasl_password: "${KAFKA_PASSWORD}"
+    
+    processor:
+      worker_count: 4
+      sampling_rate: 0
+    
+    storage:
+      primary:
+        nodes:
+          - "${ES_HOSTS}"
+        index_prefix: "tough-streets"
+        username: "${ES_USERNAME}"
+        password: "${ES_PASSWORD}"
+        enable_tls: true
+        shards: 3
+        replicas: 1
+      lifecycle:
+        packet_retention: "24h"
+        flow_retention: "168h"
+        metrics_retention: "720h"
+        topology_retention: "2160h"
+        enable_archival: true
+        archival_target: "backup_repository"

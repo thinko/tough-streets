@@ -3,7 +3,6 @@ package dhcp
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"net"
 	"time"
@@ -90,21 +89,21 @@ func NewServer(cfg config.DHCPConfig, db storage.DataAccessLayer) (*Server, erro
 // Start begins listening for DHCP requests
 func (s *Server) Start() error {
 	s.log.WithFields(logger.Fields{
-		"interface":   s.config.Interface,
-		"ip_range":    s.config.IPRangeStart + "-" + s.config.IPRangeEnd,
-		"lease_time":  s.config.LeaseTime,
-		"domain":      s.config.DomainName,
-		"router":      s.config.Router,
-		"dns_servers": s.config.DNSServers,
+		"interface":     s.config.Interface,
+		"ip_range":      s.config.IPRangeStart + "-" + s.config.IPRangeEnd,
+		"lease_time":    s.config.LeaseTime,
+		"domain":        s.config.DomainName,
+		"router":        s.config.Router,
+		"dns_servers":   s.config.DNSServers,
 	}).Info("Starting DHCP server")
 
 	metrics.DHCPOperations.WithLabelValues("server", "start").Inc()
 
 	handler := &dhcpHandler{
-		config: s.config,
-		db:     s.db,
-		ipPool: s.ipPool,
-		log:    s.log.WithField("subcomponent", "request_handler"),
+		config:  s.config,
+		db:      s.db,
+		ipPool:  s.ipPool,
+		log:     s.log.WithField("subcomponent", "request_handler"),
 	}
 
 	// Start the periodic lease cleanup
@@ -243,7 +242,7 @@ func (h *dhcpHandler) handleDiscover(p dhcp4.Packet, options dhcp4.Options, macA
 
 	// Convert dhcp4.Options to []dhcp4.Option format
 	opts := []dhcp4.Option{}
-
+	
 	// Add DNS servers
 	if len(h.config.DNSServers) > 0 {
 		dnsIPs := make([]byte, 0, len(h.config.DNSServers)*4)
@@ -255,7 +254,7 @@ func (h *dhcpHandler) handleDiscover(p dhcp4.Packet, options dhcp4.Options, macA
 			Value: dnsIPs,
 		})
 	}
-
+	
 	// Domain name
 	if h.config.DomainName != "" {
 		opts = append(opts, dhcp4.Option{
@@ -263,19 +262,19 @@ func (h *dhcpHandler) handleDiscover(p dhcp4.Packet, options dhcp4.Options, macA
 			Value: []byte(h.config.DomainName),
 		})
 	}
-
+	
 	// Router
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionRouter,
 		Value: net.ParseIP(h.config.Router).To4(),
 	})
-
+	
 	// Subnet mask (assuming /24 for simplicity)
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionSubnetMask,
 		Value: []byte{255, 255, 255, 0},
 	})
-
+	
 	return dhcp4.ReplyPacket(
 		p,
 		dhcp4.Offer,
@@ -324,7 +323,7 @@ func (h *dhcpHandler) handleRequest(p dhcp4.Packet, options dhcp4.Options, macAd
 
 	// Convert dhcp4.Options to []dhcp4.Option format
 	opts := []dhcp4.Option{}
-
+	
 	// Add DNS servers
 	if len(h.config.DNSServers) > 0 {
 		dnsIPs := make([]byte, 0, len(h.config.DNSServers)*4)
@@ -336,7 +335,7 @@ func (h *dhcpHandler) handleRequest(p dhcp4.Packet, options dhcp4.Options, macAd
 			Value: dnsIPs,
 		})
 	}
-
+	
 	// Domain name
 	if h.config.DomainName != "" {
 		opts = append(opts, dhcp4.Option{
@@ -344,19 +343,19 @@ func (h *dhcpHandler) handleRequest(p dhcp4.Packet, options dhcp4.Options, macAd
 			Value: []byte(h.config.DomainName),
 		})
 	}
-
+	
 	// Router
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionRouter,
 		Value: net.ParseIP(h.config.Router).To4(),
 	})
-
+	
 	// Subnet mask (assuming /24 for simplicity)
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionSubnetMask,
 		Value: []byte{255, 255, 255, 0},
 	})
-
+	
 	return dhcp4.ReplyPacket(
 		p,
 		dhcp4.ACK,
@@ -383,7 +382,7 @@ func (h *dhcpHandler) handleRelease(p dhcp4.Packet, options dhcp4.Options, macAd
 func (h *dhcpHandler) handleReservation(p dhcp4.Packet, msgType dhcp4.MessageType, options dhcp4.Options, reservedIP net.IP, macAddr net.HardwareAddr) dhcp4.Packet {
 	// Convert dhcp4.Options to []dhcp4.Option format
 	opts := []dhcp4.Option{}
-
+	
 	// Add DNS servers
 	if len(h.config.DNSServers) > 0 {
 		dnsIPs := make([]byte, 0, len(h.config.DNSServers)*4)
@@ -395,7 +394,7 @@ func (h *dhcpHandler) handleReservation(p dhcp4.Packet, msgType dhcp4.MessageTyp
 			Value: dnsIPs,
 		})
 	}
-
+	
 	// Domain name
 	if h.config.DomainName != "" {
 		opts = append(opts, dhcp4.Option{
@@ -403,19 +402,19 @@ func (h *dhcpHandler) handleReservation(p dhcp4.Packet, msgType dhcp4.MessageTyp
 			Value: []byte(h.config.DomainName),
 		})
 	}
-
+	
 	// Router
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionRouter,
 		Value: net.ParseIP(h.config.Router).To4(),
 	})
-
+	
 	// Subnet mask (assuming /24 for simplicity)
 	opts = append(opts, dhcp4.Option{
 		Code:  dhcp4.OptionSubnetMask,
 		Value: []byte{255, 255, 255, 0},
 	})
-
+	
 	switch msgType {
 	case dhcp4.Discover:
 		return dhcp4.ReplyPacket(p, dhcp4.Offer, net.ParseIP(h.config.Router), reservedIP,

@@ -1,0 +1,31 @@
+# Development Containerfile for use with Podman
+FROM golang:1.20-alpine
+
+WORKDIR /app
+
+# Install development dependencies
+RUN apk add --no-cache git ca-certificates tzdata build-base curl bash
+
+# Install development tools
+RUN go install github.com/cosmtrek/air@latest && \
+    go install github.com/go-delve/delve/cmd/dlv@latest && \
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Copy the source code
+COPY . .
+
+# Install Go dependencies
+RUN go mod download
+
+# Add capability to bind to privileged ports
+RUN apk add --no-cache libcap && \
+    setcap 'cap_net_bind_service=+ep' /go/bin/air
+
+# Expose ports
+EXPOSE 9090/tcp  # Metrics
+EXPOSE 53/tcp    # DNS TCP
+EXPOSE 53/udp    # DNS UDP
+EXPOSE 2345/tcp  # Delve debugger
+
+# Use air for live-reloading during development
+ENTRYPOINT ["/go/bin/air", "-c", ".air.toml"]
