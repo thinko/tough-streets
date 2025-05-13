@@ -2,7 +2,6 @@ package resilience
 
 import (
 	"errors"
-	"fmt"
 )
 
 // Custom error variables
@@ -21,7 +20,7 @@ var (
 // IsRetryableError determines if an error should be retried
 func IsRetryableError(err error) bool {
 	// Customize based on your application needs
-	if errors.Is(err, ErrCircuitOpen) || errors.Is(err, ErrBulkheadFull) {
+	if IsCircuitBreakerOpenError(err) || IsBulkheadFullError(err) {
 		return false // Don't retry when circuit is open or bulkhead is full
 	}
 
