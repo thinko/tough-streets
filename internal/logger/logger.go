@@ -1,0 +1,301 @@
+// Package logger provides structured logging capabilities using Zap
+package logger
+
+import (
+	"context"
+	"io"
+	"os"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+// Level type
+type Level int8
+
+// Log levels
+const (
+	DebugLevel Level = iota - 1
+	InfoLevel
+	WarnLevel
+	ErrorLevel
+	FatalLevel
+)
+
+var (
+	defaultLogger *Logger
+)
+
+// Fields type, used to pass to `WithFields`.
+type Fields map[string]interface{}
+
+// Field is an alias for zapcore.Field for direct field construction
+type Field = zapcore.Field
+
+// Convenience field constructors for strongly typed logging
+var (
+	Any    = zap.Any
+	String = zap.String
+	Int    = zap.Int
+	Int64  = zap.Int64
+	Bool   = zap.Bool
+	Float  = zap.Float64
+	Time   = zap.Time
+	Err    = zap.Error // Renamed to avoid conflict with the Error() logging function
+)
+
+// Logger represents a structured logger using Zap
+type Logger struct {
+	zap    *zap.Logger
+	sugar  *zap.SugaredLogger
+	output io.Writer
+}
+
+// init initializes the default logger
+func init() {
+	defaultLogger = NewLogger(os.Stdout)
+}
+
+// NewLogger creates a new logger instance
+func NewLogger(output io.Writer) *Logger {
+	// Create a custom core that writes to the output
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.TimeKey = "timestamp"
+	encoderCfg.MessageKey = "message"
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	// Determine log level from environment
+	logLevel := zap.InfoLevel
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		_ = logLevel.UnmarshalText([]byte(lvl))
+	}
+
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderCfg),
+		zapcore.AddSync(output),
+		logLevel,
+	)
+
+	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+
+	return &Logger{
+		zap:    zapLogger,
+		sugar:  zapLogger.Sugar(),
+		output: output,
+	}
+}
+
+// WithField adds a single field to the Logger.
+func (l *Logger) WithField(key string, value interface{}) *Logger {
+	return &Logger{
+		zap:    l.zap.With(zap.Any(key, value)),
+		sugar:  l.zap.With(zap.Any(key, value)).Sugar(),
+		output: l.output,
+	}
+}
+
+// WithFields adds multiple fields to the Logger.
+func (l *Logger) WithFields(fields Fields) *Logger {
+	zapFields := make([]zap.Field, 0, len(fields))
+	for k, v := range fields {
+		zapFields = append(zapFields, zap.Any(k, v))
+	}
+
+	return &Logger{
+		zap:    l.zap.With(zapFields...),
+		sugar:  l.zap.With(zapFields...).Sugar(),
+		output: l.output,
+	}
+}
+
+// WithError adds an error field to the Logger.
+func (l *Logger) WithError(err error) *Logger {
+	if err == nil {
+		return l
+	}
+	return &Logger{
+		zap:    l.zap.With(zap.Error(err)),
+		sugar:  l.zap.With(zap.Error(err)).Sugar(),
+		output: l.output,
+	}
+}
+
+// WithContext adds context fields to the Logger.
+func (l *Logger) WithContext(ctx context.Context) *Logger {
+	// Extract any context values for logging
+	return l
+}
+
+// Debug logs a message at debug level.
+func (l *Logger) Debug(args ...interface{}) {
+	l.sugar.Debug(args...)
+}
+
+// Info logs a message at info level.
+func (l *Logger) Info(args ...interface{}) {
+	l.sugar.Info(args...)
+}
+
+// Warn logs a message at warn level.
+func (l *Logger) Warn(args ...interface{}) {
+	l.sugar.Warn(args...)
+}
+
+// Error logs a message at error level.
+func (l *Logger) Error(args ...interface{}) {
+	l.sugar.Error(args...)
+}
+
+// Fatal logs a message at fatal level and exits.
+func (l *Logger) Fatal(args ...interface{}) {
+	l.sugar.Fatal(args...)
+}
+
+// Debugf logs a formatted message at debug level.
+func (l *Logger) Debugf(format string, args ...interface{}) {
+	l.sugar.Debugf(format, args...)
+}
+
+// Infof logs a formatted message at info level.
+func (l *Logger) Infof(format string, args ...interface{}) {
+	l.sugar.Infof(format, args...)
+}
+
+// Warnf logs a formatted message at warn level.
+func (l *Logger) Warnf(format string, args ...interface{}) {
+	l.sugar.Warnf(format, args...)
+}
+
+// Errorf logs a formatted message at error level.
+func (l *Logger) Errorf(format string, args ...interface{}) {
+	l.sugar.Errorf(format, args...)
+}
+
+// Fatalf logs a formatted message at fatal level and exits.
+func (l *Logger) Fatalf(format string, args ...interface{}) {
+	l.sugar.Fatalf(format, args...)
+}
+
+// Sync flushes any buffered log entries.
+func (l *Logger) Sync() error {
+	return l.zap.Sync()
+}
+
+// Global logging functions
+
+// Debug logs a message at debug level using the default logger.
+func Debug(args ...interface{}) {
+	defaultLogger.Debug(args...)
+}
+
+// Info logs a message at info level using the default logger.
+func Info(args ...interface{}) {
+	defaultLogger.Info(args...)
+}
+
+// Warn logs a message at warn level using the default logger.
+func Warn(args ...interface{}) {
+	defaultLogger.Warn(args...)
+}
+
+// Error logs a message at error level using the default logger.
+func Error(args ...interface{}) {
+	defaultLogger.Error(args...)
+}
+
+// Fatal logs a message at fatal level and exits using the default logger.
+func Fatal(args ...interface{}) {
+	defaultLogger.Fatal(args...)
+}
+
+// Debugf logs a formatted message at debug level using the default logger.
+func Debugf(format string, args ...interface{}) {
+	defaultLogger.Debugf(format, args...)
+}
+
+// Infof logs a formatted message at info level using the default logger.
+func Infof(format string, args ...interface{}) {
+	defaultLogger.Infof(format, args...)
+}
+
+// Warnf logs a formatted message at warn level using the default logger.
+func Warnf(format string, args ...interface{}) {
+	defaultLogger.Warnf(format, args...)
+}
+
+// Errorf logs a formatted message at error level using the default logger.
+func Errorf(format string, args ...interface{}) {
+	defaultLogger.Errorf(format, args...)
+}
+
+// Fatalf logs a formatted message at fatal level and exits using the default logger.
+func Fatalf(format string, args ...interface{}) {
+	defaultLogger.Fatalf(format, args...)
+}
+
+// Configuration functions
+
+// SetOutput sets the output writer for the default logger.
+func SetOutput(output io.Writer) {
+	defaultLogger = NewLogger(output)
+}
+
+// GetLogger returns the default logger instance.
+func GetLogger() *Logger {
+	return defaultLogger
+}
+
+// SetLogger sets the default logger instance.
+func SetLogger(logger *Logger) {
+	defaultLogger = logger
+}
+
+// SetLevel sets the logging level for the given logger
+func (l *Logger) SetLevel(level Level) {
+	var zapLevel zapcore.Level
+	switch level {
+	case DebugLevel:
+		zapLevel = zapcore.DebugLevel
+	case InfoLevel:
+		zapLevel = zapcore.InfoLevel
+	case WarnLevel:
+		zapLevel = zapcore.WarnLevel
+	case ErrorLevel:
+		zapLevel = zapcore.ErrorLevel
+	case FatalLevel:
+		zapLevel = zapcore.FatalLevel
+	default:
+		zapLevel = zapcore.InfoLevel
+	}
+
+	// Create a new logger with the updated level
+	// This is a bit hacky but necessary since Zap logger levels are immutable
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.TimeKey = "timestamp"
+	encoderCfg.MessageKey = "message"
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderCfg),
+		zapcore.AddSync(l.output),
+		zapLevel,
+	)
+
+	l.zap = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	l.sugar = l.zap.Sugar()
+}
+
+// AddHook - placeholder for compatibility
+func (l *Logger) AddHook(hook interface{}) {
+	// No-op for Zap
+}
+
+// Close flushes any buffered log entries
+func (l *Logger) Close() error {
+	return l.zap.Sync()
+}
+
+// Close flushes any buffered log entries in the default logger
+func Close() error {
+	return defaultLogger.Close()
+}
