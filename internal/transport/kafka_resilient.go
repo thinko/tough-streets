@@ -9,7 +9,8 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/sirupsen/logrus"
 
-	"github.com/thinko/tough-streets/internal/resilience"
+	"tough-streets/internal/logger"
+	"tough-streets/internal/resilience"
 )
 
 // KafkaTransportConfig holds configuration for the Kafka transport
@@ -25,18 +26,17 @@ type KafkaTransportConfig struct {
 	SASLUser        string        // SASL username
 	SASLPassword    string        // SASL password
 	// Resilience configuration
-	CircuitBreakerConfig resilience.BreakerConfig  // Circuit breaker configuration
-	RetryConfig          resilience.RetryConfig    // Retry configuration
-	BulkheadConfig       resilience.BulkheadConfig // Bulkhead configuration
-	TimeoutConfig        resilience.TimeoutConfig  // Timeout configuration
+	CircuitBreakerConfig resilience.CircuitBreakerConfig // Circuit breaker configuration using Failsafe-Go
+	RetryConfig          resilience.RetryConfig          // Retry configuration using Failsafe-Go
+	BulkheadConfig       resilience.BulkheadConfig       // Bulkhead configuration
+	TimeoutConfig        resilience.TimeoutConfig        // Timeout configuration
 	// Logger for transport operations
-	Logger *logrus.Logger
+	Logger *logger.Logger
 }
 
 // DefaultKafkaTransportConfig returns sensible defaults for the Kafka transport
 func DefaultKafkaTransportConfig(brokers []string, topic, consumerGroup string) KafkaTransportConfig {
-	logger := logrus.New()
-	logger.SetFormatter(&logrus.JSONFormatter{})
+	log := logger.GetLogger().WithField("component", "kafka-transport")
 
 	return KafkaTransportConfig{
 		Brokers:              brokers,
@@ -47,11 +47,11 @@ func DefaultKafkaTransportConfig(brokers []string, topic, consumerGroup string) 
 		BatchTimeout:         time.Second * 5,
 		EnableTLS:            false,
 		EnableSASL:           false,
-		CircuitBreakerConfig: resilience.DefaultBreakerConfig("kafka-transport", logger),
+		CircuitBreakerConfig: resilience.DefaultCircuitBreakerConfig("kafka-transport"),
 		RetryConfig:          resilience.DefaultRetryConfig(),
 		BulkheadConfig:       resilience.DefaultBulkheadConfig(),
 		TimeoutConfig:        resilience.DefaultTimeoutConfig(),
-		Logger:               logger,
+		Logger:               log,
 	}
 }
 

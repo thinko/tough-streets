@@ -23,15 +23,27 @@ import (
 type ElasticsearchStorage struct {
 	client         *elasticsearch.Client
 	log            *logger.Logger
+	executor       *resilience.Executor
 	circuitBreaker *resilience.CircuitBreaker
 	retryOptions   resilience.RetryOptions
 }
 
 // NewElasticsearchStorage creates a new Elasticsearch storage instance
 func NewElasticsearchStorage(client *elasticsearch.Client) *ElasticsearchStorage {
-	// Create a circuit breaker specifically for Elasticsearch operations
+	log := logger.GetLogger().WithField("component", "elasticsearch_storage")
+
+	// Create a Failsafe-Go executor with circuit breaker and retry policies
+	executor := resilience.NewExecutor("elasticsearch", log)
+
+	// Add circuit breaker
+	executor.WithCircuitBreaker(resilience.DefaultCircuitBreakerConfig("elasticsearch"))
+
+	// Add retry policy
+	executor.WithRetry(resilience.DefaultRetryConfig())
+
+	// For backward compatibility with existing code
 	cb := resilience.NewCircuitBreaker(
-		resilience.CircuitBreakerConfig{
+		resilience.LegacyCircuitBreakerConfig{
 			Name:             "elasticsearch",
 			FailureThreshold: 0.3,             // Trip after 30% failures
 			MinimumRequests:  10,              // After at least 10 requests
@@ -41,7 +53,7 @@ func NewElasticsearchStorage(client *elasticsearch.Client) *ElasticsearchStorage
 		},
 	)
 
-	// Configure retry options
+	// Configure retry options for backward compatibility
 	retryOptions := resilience.RetryOptions{
 		MaxRetries:      3,
 		InitialInterval: 100 * time.Millisecond,
@@ -52,7 +64,8 @@ func NewElasticsearchStorage(client *elasticsearch.Client) *ElasticsearchStorage
 
 	return &ElasticsearchStorage{
 		client:         client,
-		log:            logger.GetLogger().WithField("component", "elasticsearch_storage"),
+		log:            log,
+		executor:       executor,
 		circuitBreaker: cb,
 		retryOptions:   retryOptions,
 	}
@@ -65,8 +78,13 @@ func (es *ElasticsearchStorage) execute(ctx context.Context, operationName strin
 		metrics.StorageLatency.WithLabelValues(operationName).Observe(time.Since(startTime).Seconds())
 	}()
 
-	// Combine circuit breaker and retry patterns
-	err := resilience.WithCircuitBreakerAndRetry(ctx, es.circuitBreaker, es.retryOptions, operation)
+	// Create a wrapper function to match the signature expected by Executor
+	wrapper := func(ctx context.Context) error {
+		return operation()
+	}
+
+	// Execute with Failsafe-Go executor
+	err := es.executor.ExecuteWithoutResult(ctx, wrapper)
 
 	if err != nil {
 		es.log.WithError(err).Errorf("Elasticsearch operation %s failed after retries", operationName)

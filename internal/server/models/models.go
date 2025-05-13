@@ -9,9 +9,11 @@ import (
 type Device struct {
 	ID                string       `json:"id"`                            // Unique identifier (e.g., UUID)
 	PrimaryMAC        string       `json:"primary_mac"`                   // Primary MAC address
+	MACAddress        string       `json:"mac_address"`                   // Alternative field for MAC address
 	AdditionalMACs    []string     `json:"additional_macs,omitempty"`    // Additional MAC addresses seen
 	Hostnames         []string     `json:"hostnames"`                    // Known hostnames
 	IPAddresses       []IPAddress  `json:"ip_addresses"`                 // Known IP addresses
+	DHCPReservation   bool         `json:"dhcp_reservation,omitempty"`   // Whether the device has a DHCP reservation
 	DHCPReservationIP string       `json:"dhcp_reservation_ip,omitempty"` // IP reserved by DHCP
 	LastSeenAt        time.Time    `json:"last_seen_at"`                // Last time device was seen
 	Status            string       `json:"status"`                       // active, inactive, historical
@@ -27,6 +29,7 @@ type IPAddress struct {
 	Address     string    `json:"address"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+	LeaseEnd    time.Time `json:"lease_end,omitempty"`
 	IsDHCPLease bool      `json:"is_dhcp_lease,omitempty"`
 	Source      string    `json:"source"`          // DHCP, manual, discovered
 	VLAN        uint16    `json:"vlan,omitempty"` // VLAN ID if applicable

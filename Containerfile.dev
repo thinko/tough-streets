@@ -22,10 +22,10 @@ RUN apk add --no-cache libcap && \
     setcap 'cap_net_bind_service=+ep' /go/bin/air
 
 # Expose ports
-EXPOSE 9090/tcp  # Metrics
-EXPOSE 53/tcp    # DNS TCP
-EXPOSE 53/udp    # DNS UDP
-EXPOSE 2345/tcp  # Delve debugger
+EXPOSE 9090/tcp
+EXPOSE 53/tcp
+EXPOSE 53/udp
+EXPOSE 2345/tcp
 
 # Use air for live-reloading during development
 ENTRYPOINT ["/go/bin/air", "-c", ".air.toml"]

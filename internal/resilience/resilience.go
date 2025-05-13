@@ -1,15 +1,19 @@
-// Package resilience provides fault-tolerance and resilience patterns
+// Package resilience provides fault-tolerance and resilience patterns using Failsafe-Go
 package resilience
 
 import (
 	"context"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	"tough-streets/internal/logger"
+
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 )
 
-// CircuitBreakerConfig holds configuration for a circuit breaker
-type CircuitBreakerConfig struct {
+// LegacyCircuitBreakerConfig is maintained for backward compatibility
+// New code should use CircuitBreakerConfig from failsafe_go.go
+type LegacyCircuitBreakerConfig struct {
 	Name             string
 	FailureThreshold float64       // Threshold for failures in range [0.0, 1.0]
 	MinimumRequests  int64         // Minimum number of requests before calculating error rate
@@ -18,119 +22,35 @@ type CircuitBreakerConfig struct {
 	SuccessThreshold int64         // Number of consecutive successes to close the circuit
 }
 
-// DefaultCircuitBreakerConfig returns a default circuit breaker configuration
-func DefaultCircuitBreakerConfig(name string) CircuitBreakerConfig {
-	return CircuitBreakerConfig{
-		Name:             name,
-		FailureThreshold: 0.5,             // 50% failure rate trips the circuit
-		MinimumRequests:  5,               // At least 5 requests before calculating error rate
-		Interval:         time.Minute,     // Calculate failure rate over 1 minute
-		Timeout:          time.Minute * 2, // Stay tripped for 2 minutes before half-open
-		SuccessThreshold: 3,               // 3 consecutive successes to close the circuit
-	}
-}
-
-// CircuitBreaker is a simple circuit breaker implementation
-type CircuitBreaker struct {
-	name            string
-	state           State
-	failureCount    int64
-	successCount    int64
-	totalRequests   int64
-	lastStateChange time.Time
-	lastFailure     time.Time
-	config          CircuitBreakerConfig
-}
-
-// State represents the state of the circuit breaker
+// State represents the state of the legacy circuit breaker
+// New code should use circuitbreaker.State from Failsafe-Go
 type State int
 
 const (
+	// Closed indicates the circuit is closed and operations execute normally
 	Closed State = iota
+	// HalfOpen indicates the circuit is testing if it can close again
 	HalfOpen
+	// Open indicates the circuit is open and operations fail fast
 	Open
 )
 
-// NewCircuitBreaker creates a new circuit breaker with the given configuration
-func NewCircuitBreaker(config CircuitBreakerConfig) *CircuitBreaker {
-	return &CircuitBreaker{
-		name:            config.Name,
-		state:           Closed,
-		failureCount:    0,
-		successCount:    0,
-		totalRequests:   0,
-		lastStateChange: time.Now(),
-		config:          config,
-	}
-}
-
-// Execute runs the given function with circuit breaker protection
-func (c *CircuitBreaker) Execute(ctx context.Context, fn func() error) error {
-	// Check circuit state
-	switch c.state {
-	case Open:
-		// Check if timeout has elapsed
-		if time.Since(c.lastStateChange) > c.config.Timeout {
-			c.setState(HalfOpen)
-		} else {
-			return ErrCircuitOpen
-		}
+// String returns a string representation of the circuit state
+func (s State) String() string {
+	switch s {
+	case Closed:
+		return "CLOSED"
 	case HalfOpen:
-		// In half-open state, only allow a limited number of requests through
-		if c.successCount >= c.config.SuccessThreshold {
-			c.setState(Closed)
-		}
-	}
-
-	// Execute the function
-	err := fn()
-
-	// Update circuit breaker state based on result
-	c.totalRequests++
-	if err != nil {
-		c.failureCount++
-		c.successCount = 0
-		c.lastFailure = time.Now()
-
-		// Check if we should trip the circuit
-		if c.state == Closed && c.totalRequests >= c.config.MinimumRequests {
-			failureRate := float64(c.failureCount) / float64(c.totalRequests)
-			if failureRate >= c.config.FailureThreshold {
-				c.setState(Open)
-			}
-		} else if c.state == HalfOpen {
-			// Any failure in half-open state should reopen the circuit
-			c.setState(Open)
-		}
-	} else {
-		// Success case
-		if c.state == HalfOpen {
-			c.successCount++
-			if c.successCount >= c.config.SuccessThreshold {
-				c.setState(Closed)
-			}
-		}
-	}
-
-	return err
-}
-
-// setState changes the state of the circuit breaker
-func (c *CircuitBreaker) setState(newState State) {
-	c.state = newState
-	c.lastStateChange = time.Now()
-
-	// Reset counters on state change
-	if newState == Closed {
-		c.failureCount = 0
-		c.successCount = 0
-		c.totalRequests = 0
-	} else if newState == HalfOpen {
-		c.successCount = 0
+		return "HALF_OPEN"
+	case Open:
+		return "OPEN"
+	default:
+		return "UNKNOWN"
 	}
 }
 
-// RetryOptions defines retry behavior
+// RetryOptions defines retry behavior for backward compatibility
+// New code should use RetryConfig from failsafe_go.go
 type RetryOptions struct {
 	MaxRetries      int
 	InitialInterval time.Duration
@@ -142,38 +62,151 @@ type RetryOptions struct {
 // DefaultRetryOptions returns sensible default retry options
 func DefaultRetryOptions() RetryOptions {
 	return RetryOptions{
-		MaxRetries:      5,
+		MaxRetries:      3,
 		InitialInterval: 100 * time.Millisecond,
-		MaxInterval:     5 * time.Second,
-		Multiplier:      1.5,
-		MaxElapsedTime:  30 * time.Second,
+		MaxInterval:     2 * time.Second,
+		Multiplier:      2.0,
+		MaxElapsedTime:  10 * time.Second,
 	}
 }
 
-// ErrCircuitOpen is returned when the circuit is open
-var ErrCircuitOpen = backoff.Permanent(ErrCircuitOpenError{})
+// WithRetry executes the given function with retry policy using Failsafe-Go
+func WithRetry(ctx context.Context, options RetryOptions, operation func() error) error {
+	// Create a retry policy using Failsafe-Go
+	retryPolicy := retrypolicy.Builder().
+		HandleErrors().
+		WithMaxAttempts(options.MaxRetries+1). // +1 because MaxRetries is additional attempts
+		WithBackoff(options.InitialInterval, options.MaxInterval).
+		WithJitter(0.2). // 20% jitter
+		WithDelayFactor(options.Multiplier).
+		Build()
 
-// ErrCircuitOpenError is the error returned when a circuit is open
-type ErrCircuitOpenError struct{}
+	// Create a wrapper function to match Failsafe-Go's function signature
+	wrapper := func(ctx context.Context) (interface{}, error) {
+		return nil, operation()
+	}
 
-func (e ErrCircuitOpenError) Error() string {
-	return "circuit breaker is open"
+	// Execute with the retry policy
+	_, err := retryPolicy.ExecuteContext(ctx, wrapper)
+	return err
 }
 
-// WithRetry executes the given function with exponential backoff retry
-func WithRetry(ctx context.Context, options RetryOptions, operation func() error) error {
-	backoffConfig := backoff.NewExponentialBackOff()
-	backoffConfig.InitialInterval = options.InitialInterval
-	backoffConfig.MaxInterval = options.MaxInterval
-	backoffConfig.Multiplier = options.Multiplier
-	backoffConfig.MaxElapsedTime = options.MaxElapsedTime
+// CircuitBreaker is a legacy circuit breaker implementation for backward compatibility
+// New code should use Executor with WithCircuitBreaker from failsafe_go.go
+type CircuitBreaker struct {
+	// Embed the Failsafe-Go circuit breaker
+	circuitBreaker *circuitbreaker.CircuitBreaker
+	name           string
+	log            *logger.Logger
+}
 
-	return backoff.Retry(operation, backoff.WithContext(backoffConfig, ctx))
+// NewCircuitBreaker creates a new circuit breaker with the given configuration
+// using the Failsafe-Go implementation internally
+func NewCircuitBreaker(legacyConfig LegacyCircuitBreakerConfig) *CircuitBreaker {
+	// Create an equivalent Failsafe-Go circuit breaker configuration
+	builder := circuitbreaker.Builder().
+		WithName(legacyConfig.Name).
+		WithFailureThreshold(legacyConfig.FailureThreshold).
+		WithMinimumThreshold(int(legacyConfig.MinimumRequests)).
+		WithDelay(legacyConfig.Timeout).
+		WithSuccessThreshold(int(legacyConfig.SuccessThreshold))
+
+	cb := builder.Build()
+
+	return &CircuitBreaker{
+		circuitBreaker: cb,
+		name:           legacyConfig.Name,
+		log:            logger.GetLogger(),
+	}
+}
+
+// Execute runs the given function with circuit breaker protection
+func (c *CircuitBreaker) Execute(ctx context.Context, operation func() error) error {
+	// Wrap the function to match Failsafe-Go's function signature
+	wrapper := func(ctx context.Context) (interface{}, error) {
+		return nil, operation()
+	}
+
+	// Execute with the circuit breaker
+	_, err := c.circuitBreaker.ExecuteContext(ctx, wrapper)
+	return err
+}
+
+// OnStateChange adds a listener for state changes to maintain backward compatibility
+func (c *CircuitBreaker) OnStateChange(listener func(from, to State)) {
+	// Map from Failsafe-Go state to our legacy State
+	stateMap := func(state circuitbreaker.State) State {
+		switch state {
+		case circuitbreaker.StateClosed:
+			return Closed
+		case circuitbreaker.StateHalfOpen:
+			return HalfOpen
+		case circuitbreaker.StateOpen:
+			return Open
+		default:
+			return Closed
+		}
+	}
+
+	// Add the state change listener to the Failsafe-Go circuit breaker
+	c.circuitBreaker.OnStateChanged(func(event *circuitbreaker.StateChangedEvent) {
+		listener(stateMap(event.PreviousState), stateMap(event.CurrentState))
+	})
+}
+
+// GetState returns the current circuit breaker state
+func (c *CircuitBreaker) GetState() State {
+	fsState := c.circuitBreaker.State()
+	switch fsState {
+	case circuitbreaker.StateClosed:
+		return Closed
+	case circuitbreaker.StateHalfOpen:
+		return HalfOpen
+	case circuitbreaker.StateOpen:
+		return Open
+	default:
+		return Closed
+	}
+}
+
+// WithCircuitBreaker executes an operation with circuit breaker protection
+// for backward compatibility
+func WithCircuitBreaker(ctx context.Context, cb *CircuitBreaker, operation func() error) error {
+	return cb.Execute(ctx, operation)
 }
 
 // WithCircuitBreakerAndRetry combines circuit breaker and retry patterns
+// for backward compatibility
 func WithCircuitBreakerAndRetry(ctx context.Context, cb *CircuitBreaker, retryOptions RetryOptions, operation func() error) error {
-	return cb.Execute(ctx, func() error {
+	return WithCircuitBreaker(ctx, cb, func() error {
 		return WithRetry(ctx, retryOptions, operation)
 	})
+}
+
+// BulkheadConfig defines the configuration for a bulkhead
+type BulkheadConfig struct {
+	MaxConcurrent int           // Maximum number of concurrent executions
+	MaxQueueSize  int           // Maximum size of the queue for waiting executions
+	Timeout       time.Duration // Maximum time an execution can wait in the queue
+}
+
+// DefaultBulkheadConfig returns sensible defaults for a bulkhead
+func DefaultBulkheadConfig() BulkheadConfig {
+	return BulkheadConfig{
+		MaxConcurrent: 100,
+		MaxQueueSize:  50,
+		Timeout:       time.Second * 5,
+	}
+}
+
+// TimeoutConfig defines the configuration for a timeout
+type TimeoutConfig struct {
+	Timeout time.Duration // Maximum time an execution can take
+}
+
+// DefaultTimeoutConfig returns sensible defaults for a timeout
+func DefaultTimeoutConfig() TimeoutConfig {
+	return TimeoutConfig{
+		Timeout: time.Second * 30,
+	}
 }

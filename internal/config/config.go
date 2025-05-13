@@ -81,6 +81,8 @@ type KafkaTransportConfig struct {
 	SASLUser string `yaml:"sasl_user"`
 	// SASL password
 	SASLPassword string `yaml:"sasl_password"`
+	// Resilience configuration for this transport
+	Resilience ResilienceConfig `yaml:"resilience"`
 }
 
 // ProcessorConfig configures the packet processing pipeline

@@ -40,9 +40,9 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
 # Expose necessary ports
-EXPOSE 9090/tcp  # Metrics
-EXPOSE 53/tcp    # DNS TCP
-EXPOSE 53/udp    # DNS UDP
+EXPOSE 9090/tcp
+EXPOSE 53/tcp
+EXPOSE 53/udp
 
 # Start the application with a production configuration
 ENTRYPOINT ["/app/tough-streets"]
