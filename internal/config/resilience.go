@@ -21,22 +21,23 @@ type ResilienceConfig struct {
 type CircuitBreakerConfig struct {
 	// Enabled specifies whether the circuit breaker is active
 	Enabled bool `yaml:"enabled"`
-
+	Name    string `yaml:"name"` // Name for the circuit breaker instance
 	// FailureThreshold is the percentage of failures that will trip the circuit
 	// Value should be between 0.0 and 1.0 (0% to 100%)
 	FailureThreshold float64 `yaml:"failure_threshold"`
 
 	// MinimumRequests is the minimum number of requests needed before failure rate is calculated
-	MinimumRequests int64 `yaml:"minimum_requests"`
+	MinimumRequests int `yaml:"minimum_requests"`
 
-	// WindowInterval is the sliding window duration for calculating error rates
-	WindowInterval time.Duration `yaml:"window_interval"`
+	// SlidingWindowSize is the size of the sliding window for tracking results
+	SlidingWindowSize int `yaml:"sliding_window_size"`
 
-	// TrippedTimeout is how long the circuit stays open before allowing test requests
-	TrippedTimeout time.Duration `yaml:"tripped_timeout"`
+	// Delay is how long the circuit stays open before allowing test requests (moving to half-open)
+	Delay time.Duration `yaml:"delay"`
 
-	// HalfOpenSuccessThreshold is how many successful requests in half-open state to close circuit
-	HalfOpenSuccessThreshold int64 `yaml:"half_open_success_threshold"`
+	// SuccessRequiredToHalf is how many successful requests in half-open state to close circuit
+	SuccessRequiredToHalf int `yaml:"success_required_to_half"`
+	HalfOpenAttempts      int `yaml:"half_open_attempts"`
 }
 
 // RetryConfig configures retry behavior
@@ -53,8 +54,8 @@ type RetryConfig struct {
 	// MaxInterval is the maximum delay between retries
 	MaxInterval time.Duration `yaml:"max_interval"`
 
-	// Multiplier determines how quickly the delay increases
-	Multiplier float64 `yaml:"multiplier"`
+	// DelayFactor determines how quickly the delay increases (e.g., 2.0 for exponential)
+	DelayFactor float64 `yaml:"delay_factor"`
 
 	// RandomizationFactor adds jitter to prevent thundering herd issues
 	RandomizationFactor float64 `yaml:"randomization_factor"`
@@ -71,8 +72,8 @@ type BulkheadConfig struct {
 	// MaxQueueSize is the maximum size of the waiting queue
 	MaxQueueSize int `yaml:"max_queue_size"`
 
-	// QueueTimeout is how long an operation can wait in the queue
-	QueueTimeout time.Duration `yaml:"queue_timeout"`
+	// MaxWaitTime is how long an operation can wait for a permit from the bulkhead
+	MaxWaitTime time.Duration `yaml:"max_wait_time"`
 }
 
 // TimeoutConfig configures operation timeouts
@@ -81,7 +82,7 @@ type TimeoutConfig struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Duration is the timeout period for operations
-	Duration time.Duration `yaml:"duration"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Default configurations
@@ -99,12 +100,14 @@ func DefaultResilienceConfig() ResilienceConfig {
 // DefaultCircuitBreakerConfig provides sensible defaults for circuit breaker
 func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 	return CircuitBreakerConfig{
-		Enabled:                  true,
-		FailureThreshold:         0.5,             // 50% failure rate
-		MinimumRequests:          10,              // At least 10 requests
-		WindowInterval:           time.Minute * 5, // Over 5-minute window
-		TrippedTimeout:           time.Minute * 1, // Wait 1 minute before half-open
-		HalfOpenSuccessThreshold: 5,               // 5 successful requests to close
+		Enabled:               true,
+		Name:                  "default-cb",
+		FailureThreshold:      0.5,              // 50% failure rate
+		MinimumRequests:       10,               // At least 10 requests
+		SlidingWindowSize:     100,              // Track last 100 executions
+		Delay:                 30 * time.Second, // Wait 30s before half-open
+		SuccessRequiredToHalf: 2,                // 2 successes to close
+		HalfOpenAttempts:      5,                // 5 attempts in half-open
 	}
 }
 
@@ -115,7 +118,7 @@ func DefaultRetryConfig() RetryConfig {
 		MaxRetries:          3,
 		InitialInterval:     100 * time.Millisecond,
 		MaxInterval:         10 * time.Second,
-		Multiplier:          2.0,
+		DelayFactor:         2.0,
 		RandomizationFactor: 0.2,
 	}
 }
@@ -124,9 +127,9 @@ func DefaultRetryConfig() RetryConfig {
 func DefaultBulkheadConfig() BulkheadConfig {
 	return BulkheadConfig{
 		Enabled:       true,
-		MaxConcurrent: 20,
+		MaxConcurrent: 10,
 		MaxQueueSize:  100,
-		QueueTimeout:  5 * time.Second,
+		MaxWaitTime:   0, // Fail fast if bulkhead is full by default
 	}
 }
 
@@ -134,6 +137,6 @@ func DefaultBulkheadConfig() BulkheadConfig {
 func DefaultTimeoutConfig() TimeoutConfig {
 	return TimeoutConfig{
 		Enabled:  true,
-		Duration: 30 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 }

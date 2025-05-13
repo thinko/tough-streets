@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/bulkhead"
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/failsafe-go/failsafe-go/fallback"
 	"github.com/failsafe-go/failsafe-go/policy"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
-	"go.uber.org/zap"
+	"github.com/failsafe-go/failsafe-go/timeout"
 
 	"tough-streets/internal/logger"
 )
@@ -29,7 +30,7 @@ type CircuitBreakerConfig struct {
 	FailureThreshold      float64       // Threshold for failures in range [0.0, 1.0]
 	MinimumRequests       int           // Minimum number of requests before calculating error rate
 	SlidingWindowSize     int           // Size of the sliding window for tracking results
-	Timeout               time.Duration // Timeout for tripped state before moving to half-open
+	Delay                 time.Duration // Delay for tripped state before moving to half-open
 	SuccessRequiredToHalf int           // Number of consecutive successes to half-open the circuit
 	HalfOpenAttempts      int           // Number of allowed executions in half-open state
 }
@@ -52,11 +53,26 @@ type FallbackConfig struct {
 	ShouldFallback func(error) bool
 }
 
+// BulkheadConfig holds configuration for bulkhead policy
+type BulkheadConfig struct {
+	MaxConcurrent int           // Maximum number of concurrent executions
+	MaxWaitTime   time.Duration // Maximum time to wait for a permit
+}
+
+// TimeoutConfig holds configuration for timeout policy
+type TimeoutConfig struct {
+	Timeout time.Duration
+}
+
 // NewExecutor creates a new resilience executor with the given name and logger
 func NewExecutor(name string, log *logger.Logger) *Executor {
+	if log == nil {
+		// Fallback to default logger if none provided, though ideally it should always be passed.
+		log = logger.GetLogger().WithField("component", name+"-executor")
+	}
 	return &Executor{
 		policies: make([]policy.Policy, 0),
-		log:      log,
+		log:      log.WithField("executor_name", name), // Add executor name to logger context
 		name:     name,
 	}
 }
@@ -78,21 +94,18 @@ func (e *Executor) WithRetry(config RetryConfig) *Executor {
 		builder.WithRetryOnSpecific(err)
 	}
 
-	// Add logging for retries
-	retryPolicy := builder.
-		OnRetry(func(execution *retrypolicy.ExecutionEvent) {
+	retryPolicyInstance := builder.
+		OnRetry(func(event *retrypolicy.ExecutionEvent) {
 			e.log.WithFields(logger.Fields{
-				"attempt":      execution.AttemptCount,
-				"maxAttempts":  config.MaxAttempts,
-				"component":    e.name,
-				"nextDelayMs":  execution.NextDelay.Milliseconds(),
-				"elapsedTimeMs": execution.ElapsedTime.Milliseconds(),
-				"error":        execution.LastError.Error(),
-			}).Infof("Retrying after failure (%d/%d)", execution.AttemptCount, config.MaxAttempts)
+				"attempt":       event.AttemptCount,
+				"maxAttempts":   config.MaxAttempts,
+				"nextDelayMs":   event.NextDelay.Milliseconds(),
+				"elapsedTimeMs": event.ElapsedTime.Milliseconds(),
+			}).Warn("Retrying after failure", logger.Err(event.LastError))
 		}).
 		Build()
 
-	e.policies = append(e.policies, retryPolicy)
+	e.policies = append(e.policies, retryPolicyInstance)
 	return e
 }
 
@@ -103,37 +116,35 @@ func (e *Executor) WithCircuitBreaker(config CircuitBreakerConfig) *Executor {
 		WithFailureThreshold(config.FailureThreshold).
 		WithSlidingWindow(config.SlidingWindowSize).
 		WithMinimumThreshold(config.MinimumRequests).
-		WithDelay(config.Timeout).
+		WithDelay(config.Delay).
 		WithSuccessThreshold(config.SuccessRequiredToHalf).
 		WithHalfOpenMaxExecutions(config.HalfOpenAttempts)
 
-	// Add logging for circuit breaker state changes
-	cb := builder.
+	cbInstance := builder.
 		OnStateChanged(func(event *circuitbreaker.StateChangedEvent) {
 			e.log.WithFields(logger.Fields{
-				"component":  e.name,
-				"oldState":   event.PreviousState.String(),
-				"newState":   event.CurrentState.String(),
-				"reason":     event.Reason,
+				"cb_name":     config.Name,
+				"oldState":    event.PreviousState.String(),
+				"newState":    event.CurrentState.String(),
+				"reason":      event.Reason,
 				"failureRate": event.FailureRate,
 			}).Info("Circuit breaker state changed")
 		}).
-		OnSuccess(func(*circuitbreaker.SuccessEvent) {
+		OnSuccess(func(event *circuitbreaker.SuccessEvent) {
 			e.log.WithFields(logger.Fields{
-				"component": e.name,
+				"cb_name": config.Name,
 			}).Debug("Circuit breaker execution successful")
 		}).
 		OnFailure(func(event *circuitbreaker.FailureEvent) {
 			e.log.WithFields(logger.Fields{
-				"component":  e.name,
-				"state":      event.State.String(),
+				"cb_name":     config.Name,
+				"state":       event.State.String(),
 				"failureRate": event.FailureRate,
-				"error":      event.Error.Error(),
-			}).Debug("Circuit breaker execution failed")
+			}).Warn("Circuit breaker execution failed", logger.Err(event.Error))
 		}).
 		Build()
 
-	e.policies = append(e.policies, cb)
+	e.policies = append(e.policies, cbInstance)
 	return e
 }
 
@@ -150,37 +161,56 @@ func (e *Executor) WithFallback(config FallbackConfig) *Executor {
 		builder.WithHandleResultOnSpecific(err)
 	}
 
-	// Add logging for fallbacks
-	fallbackPolicy := builder.
+	fallbackPolicyInstance := builder.
 		OnFallback(func(event *fallback.ExecutionEvent) {
-			e.log.WithFields(logger.Fields{
-				"component": e.name,
-				"error":     event.LastError.Error(),
-			}).Debug("Executing fallback strategy")
+			e.log.Debug("Executing fallback strategy", logger.Err(event.LastError))
 		}).
 		Build()
 
-	e.policies = append(e.policies, fallbackPolicy)
+	e.policies = append(e.policies, fallbackPolicyInstance)
+	return e
+}
+
+// WithBulkhead adds a bulkhead policy to the executor
+func (e *Executor) WithBulkhead(config BulkheadConfig) *Executor {
+	builder := bulkhead.Builder(config.MaxConcurrent).
+		WithMaxWaitTime(config.MaxWaitTime)
+
+	bhPolicy := builder.
+		OnSuccess(func(event *bulkhead.ExecutionEvent) {
+			e.log.Debug("Bulkhead execution successful")
+		}).
+		OnFailure(func(event *bulkhead.ExecutionEvent) {
+			e.log.Warn("Bulkhead execution failed or rejected", logger.Err(event.LastError))
+		}).
+		Build()
+	e.policies = append(e.policies, bhPolicy)
+	return e
+}
+
+// WithTimeout adds a timeout policy to the executor
+func (e *Executor) WithTimeout(config TimeoutConfig) *Executor {
+	timeoutPolicyInstance := timeout.Builder(config.Timeout).
+		OnFailure(func(event *timeout.ExecutionEvent) { // This is actually OnTimeout
+			e.log.Warn("Execution timed out", logger.Err(event.LastError))
+		}).
+		Build()
+	e.policies = append(e.policies, timeoutPolicyInstance)
 	return e
 }
 
 // Execute runs the given function with all the configured resilience policies
 func (e *Executor) Execute(ctx context.Context, fn func(context.Context) (interface{}, error)) (interface{}, error) {
-	// Create a failsafe executor with all policies
-	executor := failsafe.NewExecutor(e.policies...)
-	
-	// Execute with context tracking
-	return executor.ExecuteContext(ctx, fn)
+	executorInstance := failsafe.NewExecutor(e.policies...)
+	return executorInstance.ExecuteContext(ctx, fn)
 }
 
 // ExecuteWithoutResult runs the given function with all the configured resilience policies,
 // ignoring any non-error result
 func (e *Executor) ExecuteWithoutResult(ctx context.Context, fn func(context.Context) error) error {
-	// Wrap the function to match the signature expected by Execute
 	wrapper := func(ctx context.Context) (interface{}, error) {
 		return nil, fn(ctx)
 	}
-	
 	_, err := e.Execute(ctx, wrapper)
 	return err
 }
@@ -194,7 +224,11 @@ func DefaultRetryConfig() RetryConfig {
 		DelayFactor:  2.0, // Exponential backoff
 		JitterFactor: 0.2, // 20% jitter
 		ShouldRetry: func(err error) bool {
-			return IsRetryableError(err)
+			// Default to retry all errors unless it's a context cancellation or specific non-retryable errors
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false
+			}
+			return IsRetryableError(err) // Assumes IsRetryableError is defined in errors.go or here
 		},
 	}
 }
@@ -206,13 +240,50 @@ func DefaultCircuitBreakerConfig(name string) CircuitBreakerConfig {
 		FailureThreshold:      0.5,              // 50% failure rate trips the circuit
 		MinimumRequests:       10,               // Minimum 10 requests before calculating error rate
 		SlidingWindowSize:     100,              // Track the last 100 executions
-		Timeout:               30 * time.Second, // Wait 30 seconds before half-open
+		Delay:                 30 * time.Second, // Wait 30 seconds before half-open
 		SuccessRequiredToHalf: 2,                // 2 consecutive successes to half-open
 		HalfOpenAttempts:      10,               // Allow 10 executions in half-open state
 	}
 }
 
+// DefaultFallbackConfig returns a default fallback configuration (which does nothing but return the error)
+func DefaultFallbackConfig() FallbackConfig {
+	return FallbackConfig{
+		FallbackFunc: func(ctx context.Context, err error) (interface{}, error) {
+			return nil, err // Default fallback re-throws the error
+		},
+		ShouldFallback: func(err error) bool {
+			return err != nil // Fallback on any error
+		},
+	}
+}
+
+// DefaultBulkheadConfig returns a default bulkhead configuration
+func DefaultBulkheadConfig() BulkheadConfig {
+	return BulkheadConfig{
+		MaxConcurrent: 10,
+		MaxWaitTime:   0, // No wait time by default, fail fast if full
+	}
+}
+
+// DefaultTimeoutConfig returns a default timeout configuration
+func DefaultTimeoutConfig() TimeoutConfig {
+	return TimeoutConfig{
+		Timeout: 30 * time.Second,
+	}
+}
+
 // IsCircuitBreakerOpenError checks if the error is because the circuit breaker is open
 func IsCircuitBreakerOpenError(err error) bool {
-	return errors.Is(err, circuitbreaker.ErrCircuitBreakerOpen) || errors.Is(err, ErrCircuitOpen)
+	return errors.Is(err, circuitbreaker.ErrCircuitBreakerOpen)
+}
+
+// IsBulkheadFullError checks if the error is because the bulkhead is full and rejected execution
+func IsBulkheadFullError(err error) bool {
+	return errors.Is(err, bulkhead.ErrBulkheadFull)
+}
+
+// IsTimeoutError checks if the error is due to a timeout policy
+func IsTimeoutError(err error) bool {
+	return errors.Is(err, timeout.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
 }
